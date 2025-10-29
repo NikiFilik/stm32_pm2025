@@ -25,70 +25,52 @@ _estack = __mcu_ram_offset + __mcu_ram_size;    /* end of RAM */
 /* Specify the memory areas */
 MEMORY
 {
-  rom (rx)      :   ORIGIN = __mcu_flash_rom_offset,     LENGTH = __mcu_flash_rom_size
-  flash(rxw)    :   ORIGIN = __mcu_flash_eeprom_offset,  LENGTH = __mcu_flash_eeprom_size
-  ram (xrw)     :   ORIGIN = __mcu_ram_offset,           LENGTH = __mcu_ram_size
+    FLASH (rx)  : ORIGIN = 0x08000000, LENGTH = 64K
+    RAM (xrw)   : ORIGIN = 0x20000000, LENGTH = 20K
 }
+
+_estack = ORIGIN(RAM) + LENGTH(RAM);
 
 
 
 /* Section Definitions */ 
-SECTIONS 
-{ 
-    .text : 
-    { 
-        KEEP(*(.isr_vector .isr_vector.*))
-        *(.text .text.* .gnu.linkonce.t.*)
-        *(.glue_7t) *(.glue_7)
-        *(.rodata .rodata* .gnu.linkonce.r.*)
-    } > rom
-    
-    .ARM.extab : 
-    {
-        *(.ARM.extab* .gnu.linkonce.armextab.*)
-    } > rom
-    
-    .ARM.exidx :
-    {
-        *(.ARM.exidx* .gnu.linkonce.armexidx.*)
-    } > rom
-
-
-    . = ALIGN(4);
-    _etext = .;
-    _sidata = .; 
-    		
-    .data : AT (_etext) 
-    { 
-        _sdata = .; 
-        *(.data .data.*) 
-        . = ALIGN(4); 
-        _edata = . ;
-    } > ram
-
-    /* .bss section which is used for uninitialized data */ 
-    .bss (NOLOAD) : 
-    { 
-        _sbss = . ; 
-        *(.bss .bss.*) 
-        *(COMMON) 
-        . = ALIGN(4); 
-        _ebss = . ; 
-    } > ram
-    
-    .ram_storage (NOLOAD) :
+SECTIONS
+{
+    .isr_vector :
     {
         . = ALIGN(4);
-        *(.ram_storage .ram_storage.*)
-    } > ram
-    
-    /* stack section */
-    .co_stack (NOLOAD):
+        KEEP(*(.isr_vector))
+        . = ALIGN(4);
+    } >FLASH
+
+    .text :
     {
-        . = ALIGN(8);
-        *(.co_stack .co_stack.*)
-    } > ram
-       
-    . = ALIGN(4); 
-    _end = . ; 
-} 
+        . = ALIGN(4);
+        *(.text)
+        *(.text*)
+        . = ALIGN(4);
+        _etext = .;
+    } >FLASH
+
+    _sidata = LOADADDR(.data);
+
+    .data : 
+    {
+        . = ALIGN(4);
+        _sdata = .;
+        *(.data)
+        *(.data*)
+        . = ALIGN(4);
+        _edata = .;
+    } >RAM AT> FLASH
+
+    .bss :
+    {
+        . = ALIGN(4);
+        _sbss = .;
+        *(.bss)
+        *(.bss*)
+        . = ALIGN(4);
+        _ebss = .;
+    } >RAM
+}
