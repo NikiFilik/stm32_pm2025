@@ -1,51 +1,59 @@
 #include <stdint.h>
 #include <stm32f10x.h>
 
-#ifndef TIM2_IRQn
-#define TIM2_IRQn 28
-#endif
+typedef struct {
+    GPIO_TypeDef* port;
+    uint32_t pin;
+} PinConfig;
 
-void SystemInit(void) {
-    // Пустая функция, но обязательная для линковки
+static const PinConfig STATUS_LED = {GPIOC, 13};
+static const PinConfig UP_BUTTON = {GPIOA, 0};
+static const PinConfig DOWN_BUTTON = {GPIOA, 1};
+
+typedef struct {
+    uint16_t divider;
+    uint16_t reload_value;
+} TimerConfig;
+
+static TimerConfig blink_timer = {7200, 10000};
+
+typedef struct {
+    uint8_t up_previous;
+    uint8_t down_previous;
+} ButtonState;
+
+static ButtonState button_status = {1, 1};
+
+static void setup_gpio(void) {
+    RCC->APB2ENR |= (RCC_APB2ENR_IOPAEN | RCC_APB2ENR_IOPCEN | RCC_APB2ENR_AFIOEN);
+    
+    STATUS_LED.port->CRH = (STATUS_LED.port->CRH & ~(GPIO_CRH_MODE13 | GPIO_CRH_CNF13)) 
+                          | GPIO_CRH_MODE13_0;
+    STATUS_LED.port->BSRR = (1U << STATUS_LED.pin);
+    
+    uint32_t temp = UP_BUTTON.port->CRL;
+    temp &= ~(GPIO_CRL_MODE0 | GPIO_CRL_CNF0 | GPIO_CRL_MODE1 | GPIO_CRL_CNF1);
+    temp |= (GPIO_CRL_CNF0_1 | GPIO_CRL_CNF1_1);
+    UP_BUTTON.port->CRL = temp;
+    
+    UP_BUTTON.port->ODR |= (1U << UP_BUTTON.pin) | (1U << DOWN_BUTTON.pin);
 }
 
-#define LED_PORT GPIOC
-#define LED_PIN 13U
-
-#define BUTTON_PORT GPIOA
-#define BUTTON_INC_PIN 0U
-#define BUTTON_DEC_PIN 1U
-
-static void gpio_init(void) {
-    RCC->APB2ENR |= RCC_APB2ENR_AFIOEN;
-    RCC->APB2ENR |= RCC_APB2ENR_IOPCEN;
-    RCC->APB2ENR |= RCC_APB2ENR_IOPAEN;
-
-    /* PC13 as push-pull output, 2 MHz */
-    LED_PORT->CRH &= ~(GPIO_CRH_MODE13 | GPIO_CRH_CNF13);
-    LED_PORT->CRH |= GPIO_CRH_MODE13_0;
-    LED_PORT->BSRR = GPIO_BSRR_BS13; /* LED off */
-
-    /* PA0/PA1 input with pull-up */
-    BUTTON_PORT->CRL &= ~(GPIO_CRL_MODE0 | GPIO_CRL_CNF0 |
-                           GPIO_CRL_MODE1 | GPIO_CRL_CNF1);
-    BUTTON_PORT->CRL |= (GPIO_CRL_CNF0_1 | GPIO_CRL_CNF1_1);
-    BUTTON_PORT->ODR |= (1U << BUTTON_INC_PIN) | (1U << BUTTON_DEC_PIN);
+static void apply_timer_settings(uint16_t divider) {
+    TIM2->PSC = divider;
+    TIM2->EGR = TIM_EGR_UG;
 }
 
-static void timer_update_prescaler(uint16_t prescaler) {
-    TIM2->PSC = prescaler;
-    TIM2->EGR = TIM_EGR_UG; /* Apply new prescaler immediately */
-}
-
-static void timer_init(uint16_t prescaler, uint16_t reload) {
+static void configure_timer(uint16_t divider, uint16_t reload) {
     RCC->APB1ENR |= RCC_APB1ENR_TIM2EN;
-
-    timer_update_prescaler(prescaler);
+    
+    apply_timer_settings(divider);
     TIM2->ARR = reload;
-
+    
     TIM2->DIER |= TIM_DIER_UIE;
-    NVIC_EnableIRQ(TIM2_IRQn);
+    
+    NVIC->ISER[0] |= (1 << 28); // TIM2_IRQn = 28
+    
 
     TIM2->CR1 |= TIM_CR1_CEN;
 }
@@ -53,43 +61,58 @@ static void timer_init(uint16_t prescaler, uint16_t reload) {
 void TIM2_IRQHandler(void) {
     if (TIM2->SR & TIM_SR_UIF) {
         TIM2->SR &= ~TIM_SR_UIF;
-        LED_PORT->ODR ^= (1U << LED_PIN);
+        STATUS_LED.port->ODR ^= (1U << STATUS_LED.pin);
     }
 }
 
-int __attribute__((noreturn)) main(void) {
-    gpio_init();
+static uint8_t is_button_active(const PinConfig* button) {
+    return (button->port->IDR & (1U << button->pin)) == 0;
+}
 
-    const uint16_t arr_reload = 9999U;      /* 10 000 ticks */
-    uint16_t prescaler = 7200U - 1U;        /* ~1 Hz at 72 MHz */
+static void process_button_events(void) {
+    uint8_t up_current = is_button_active(&UP_BUTTON);
+    uint8_t down_current = is_button_active(&DOWN_BUTTON);
+    
+    if (up_current && !button_status.up_previous) {
+        uint16_t new_divider;
+        
+        if (blink_timer.divider < 32768) {
+            new_divider = blink_timer.divider * 2;
+        } else {
+            new_divider = 65535;
+        }
+        
+        if (new_divider != blink_timer.divider) {
+            blink_timer.divider = new_divider;
+            apply_timer_settings(blink_timer.divider);
+        }
+    }
+    
+    if (down_current && !button_status.down_previous) {
+        uint16_t new_divider;
+        
+        if (blink_timer.divider > 2) {
+            new_divider = blink_timer.divider / 2;
+        } else {
+            new_divider = 1;
+        }
+        
+        if (new_divider != blink_timer.divider) {
+            blink_timer.divider = new_divider;
+            apply_timer_settings(blink_timer.divider);
+        }
+    }
+    
+    button_status.up_previous = up_current;
+    button_status.down_previous = down_current;
+}
 
-    timer_init(prescaler, arr_reload);
-
-    uint8_t prev_inc = 1U;
-    uint8_t prev_dec = 1U;
-
+int main(void) {
+    setup_gpio();
+    configure_timer(blink_timer.divider - 1, blink_timer.reload_value - 1);
+    
+    // Основной цикл программы
     while (1) {
-        uint32_t idr = BUTTON_PORT->IDR;
-        uint8_t inc_pressed = (idr & (1U << BUTTON_INC_PIN)) ? 1U : 0U;
-        uint8_t dec_pressed = (idr & (1U << BUTTON_DEC_PIN)) ? 1U : 0U;
-
-        if (!inc_pressed && prev_inc) {
-            uint16_t next = (prescaler < 0x8000U) ? (uint16_t)(prescaler << 1U) : 0xFFFFU;
-            if (next != prescaler) {
-                prescaler = next;
-                timer_update_prescaler(prescaler);
-            }
-        }
-
-        if (!dec_pressed && prev_dec) {
-            uint16_t next = (prescaler > 1U) ? (prescaler >> 1U) : 1U;
-            if (next != prescaler) {
-                prescaler = next;
-                timer_update_prescaler(prescaler);
-            }
-        }
-
-        prev_inc = inc_pressed;
-        prev_dec = dec_pressed;
+        process_button_events();
     }
 }
