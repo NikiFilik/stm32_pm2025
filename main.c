@@ -1,109 +1,95 @@
 #include <stdint.h>
+#include <stm32f10x.h>
+
+#ifndef TIM2_IRQn
+#define TIM2_IRQn 28
+#endif
 
 void SystemInit(void) {
+    // Пустая функция, но обязательная для линковки
 }
 
-#define RCC_APB2ENR   (*(volatile uint32_t*)0x40021018)
-#define GPIOA_CRL     (*(volatile uint32_t*)0x40010800)
-#define GPIOA_ODR     (*(volatile uint32_t*)0x4001080C)
-#define SPI1_CR1      (*(volatile uint32_t*)0x40013000)
-#define SPI1_SR       (*(volatile uint32_t*)0x40013008)
-#define SPI1_DR       (*(volatile uint32_t*)0x4001300C)
+#define LED_PORT GPIOC
+#define LED_PIN 13U
 
-#define CS_PIN   4
-#define DC_PIN   1
-#define RES_PIN  0
+#define BUTTON_PORT GPIOA
+#define BUTTON_INC_PIN 0U
+#define BUTTON_DEC_PIN 1U
 
-#define RCC_APB2ENR_SPI1EN    (1 << 12)
-#define RCC_APB2ENR_IOPAEN    (1 << 2)
+static void gpio_init(void) {
+    RCC->APB2ENR |= RCC_APB2ENR_AFIOEN;
+    RCC->APB2ENR |= RCC_APB2ENR_IOPCEN;
+    RCC->APB2ENR |= RCC_APB2ENR_IOPAEN;
 
-#define SPI_CR1_CPHA          (1 << 0)
-#define SPI_CR1_CPOL          (1 << 1)
-#define SPI_CR1_MSTR          (1 << 2)
-#define SPI_CR1_BR_2          (1 << 5)
-#define SPI_CR1_SSI           (1 << 8)
-#define SPI_CR1_SSM           (1 << 9)
-#define SPI_CR1_SPE           (1 << 6)
+    /* PC13 as push-pull output, 2 MHz */
+    LED_PORT->CRH &= ~(GPIO_CRH_MODE13 | GPIO_CRH_CNF13);
+    LED_PORT->CRH |= GPIO_CRH_MODE13_0;
+    LED_PORT->BSRR = GPIO_BSRR_BS13; /* LED off */
 
-#define SPI_SR_TXE            (1 << 1)
-#define SPI_SR_RXNE           (1 << 0)
-
-void delay(uint32_t count) {
-    for(volatile uint32_t i = 0; i < count; i++);
+    /* PA0/PA1 input with pull-up */
+    BUTTON_PORT->CRL &= ~(GPIO_CRL_MODE0 | GPIO_CRL_CNF0 |
+                           GPIO_CRL_MODE1 | GPIO_CRL_CNF1);
+    BUTTON_PORT->CRL |= (GPIO_CRL_CNF0_1 | GPIO_CRL_CNF1_1);
+    BUTTON_PORT->ODR |= (1U << BUTTON_INC_PIN) | (1U << BUTTON_DEC_PIN);
 }
 
-void SPI1_Init(void) {
-    RCC_APB2ENR |= RCC_APB2ENR_SPI1EN | RCC_APB2ENR_IOPAEN;
-    
-    GPIOA_CRL |= (1 << 0) | (1 << 4) | (1 << 16);
-    GPIOA_CRL |= (0xB << 20) | (0xB << 28);
-    
-    SPI1_CR1 |= SPI_CR1_CPHA | SPI_CR1_CPOL | SPI_CR1_MSTR | 
-                SPI_CR1_BR_2 | SPI_CR1_SSI | SPI_CR1_SSM | SPI_CR1_SPE;
-    
-    GPIOA_ODR |= (1 << CS_PIN) | (1 << RES_PIN);
+static void timer_update_prescaler(uint16_t prescaler) {
+    TIM2->PSC = prescaler;
+    TIM2->EGR = TIM_EGR_UG; /* Apply new prescaler immediately */
 }
 
-void SPI1_Write(uint8_t data) {
-    while(!(SPI1_SR & SPI_SR_TXE));
-    SPI1_DR = data;
+static void timer_init(uint16_t prescaler, uint16_t reload) {
+    RCC->APB1ENR |= RCC_APB1ENR_TIM2EN;
+
+    timer_update_prescaler(prescaler);
+    TIM2->ARR = reload;
+
+    TIM2->DIER |= TIM_DIER_UIE;
+    NVIC_EnableIRQ(TIM2_IRQn);
+
+    TIM2->CR1 |= TIM_CR1_CEN;
 }
 
-uint8_t SPI1_Read(void) {
-    SPI1_DR = 0xFF;
-    while(!(SPI1_SR & SPI_SR_RXNE));
-    return SPI1_DR;
-}
-
-void display_cmd(uint8_t cmd) {
-    GPIOA_ODR &= ~(1 << CS_PIN);
-    GPIOA_ODR &= ~(1 << DC_PIN);
-    SPI1_Write(cmd);
-    GPIOA_ODR |= (1 << CS_PIN);
-}
-
-void display_data(uint8_t data) {
-    GPIOA_ODR &= ~(1 << CS_PIN);
-    GPIOA_ODR |= (1 << DC_PIN);
-    SPI1_Write(data);
-    GPIOA_ODR |= (1 << CS_PIN);
-}
-
-void display_init(void) {
-    GPIOA_ODR &= ~(1 << RES_PIN);
-    delay(10000);
-    GPIOA_ODR |= (1 << RES_PIN);
-    delay(10000);
-    
-    display_cmd(0xAE);
-    display_cmd(0x20); display_cmd(0x00);
-    display_cmd(0x21); display_cmd(0x00); display_cmd(0x7F);
-    display_cmd(0x22); display_cmd(0x00); display_cmd(0x07);
-    display_cmd(0x8D); display_cmd(0x14);
-    display_cmd(0xAF);
-}
-
-void display_chessboard(void) {
-    for(uint8_t page = 0; page < 8; page++) {
-        display_cmd(0xB0 + page);
-        display_cmd(0x00);
-        display_cmd(0x10);
-        
-        for(uint8_t col = 0; col < 128; col++) {
-            if(((col / 8) + page) % 2 == 0) {
-                display_data(0xFF);
-            } else {
-                display_data(0x00);
-            }
-        }
+void TIM2_IRQHandler(void) {
+    if (TIM2->SR & TIM_SR_UIF) {
+        TIM2->SR &= ~TIM_SR_UIF;
+        LED_PORT->ODR ^= (1U << LED_PIN);
     }
 }
 
-int main(void) {
-    SPI1_Init();
-    display_init();
-    display_chessboard();
-    
-    while(1) {
+int __attribute__((noreturn)) main(void) {
+    gpio_init();
+
+    const uint16_t arr_reload = 9999U;      /* 10 000 ticks */
+    uint16_t prescaler = 7200U - 1U;        /* ~1 Hz at 72 MHz */
+
+    timer_init(prescaler, arr_reload);
+
+    uint8_t prev_inc = 1U;
+    uint8_t prev_dec = 1U;
+
+    while (1) {
+        uint32_t idr = BUTTON_PORT->IDR;
+        uint8_t inc_pressed = (idr & (1U << BUTTON_INC_PIN)) ? 1U : 0U;
+        uint8_t dec_pressed = (idr & (1U << BUTTON_DEC_PIN)) ? 1U : 0U;
+
+        if (!inc_pressed && prev_inc) {
+            uint16_t next = (prescaler < 0x8000U) ? (uint16_t)(prescaler << 1U) : 0xFFFFU;
+            if (next != prescaler) {
+                prescaler = next;
+                timer_update_prescaler(prescaler);
+            }
+        }
+
+        if (!dec_pressed && prev_dec) {
+            uint16_t next = (prescaler > 1U) ? (prescaler >> 1U) : 1U;
+            if (next != prescaler) {
+                prescaler = next;
+                timer_update_prescaler(prescaler);
+            }
+        }
+
+        prev_inc = inc_pressed;
+        prev_dec = dec_pressed;
     }
 }
